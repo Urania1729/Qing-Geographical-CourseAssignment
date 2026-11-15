@@ -1,0 +1,290 @@
+
+/************************************************************
+ * 实验名称：基于Sentinel-2的普洱市NDVI空间分布特征分析
+ * 研究区域：云南省普洱市
+ * 研究时间：2024年4月1日—2024年10月31日
+ * 数据来源：COPERNICUS/S2_SR_HARMONIZED
+ * 处理平台：Google Earth Engine
+ ************************************************************/
+
+
+// ==========================================================
+// 1. 读取研究区边界
+// ==========================================================
+
+var roi = ee.FeatureCollection(
+  'projects/utopian-nimbus-483307-v8/assets/Puer_City'
+);
+
+// 研究区几何
+var region = roi.geometry();
+
+// 查看研究区
+print('普洱市行政区边界：', roi);
+print('行政区要素数量：', roi.size());
+print('研究区面积（平方公里）：',
+      region.area(1).divide(1e6));
+
+// 地图定位
+Map.centerObject(roi, 8);
+
+// 显示研究区边界，透明填充
+var boundary = roi.style({
+  color: 'FF0000',
+  fillColor: '00000000',
+  width: 2
+});
+
+Map.addLayer(boundary, {}, 'Pu'er City Boundary');
+
+
+// ==========================================================
+// 2. 设置时间范围
+// ==========================================================
+
+var startDate = '2024-04-01';
+var endDate = '2024-11-01';
+
+
+// ==========================================================
+// 3. 加载Sentinel-2 L2A数据
+// ==========================================================
+
+var s2 = ee.ImageCollection(
+  'COPERNICUS/S2_SR_HARMONIZED'
+)
+.filterBounds(region)
+.filterDate(startDate, endDate)
+.filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 60));
+
+print('筛选后的Sentinel-2影像数量：', s2.size());
+
+
+// ==========================================================
+// 4. 云掩膜处理
+// ==========================================================
+
+function maskClouds(image) {
+
+  var scl = image.select('SCL');
+
+  // 去除无数据、饱和像元、云影、
+  // 中高概率云、卷云和积雪
+  var mask = scl.neq(0)
+    .and(scl.neq(1))
+    .and(scl.neq(3))
+    .and(scl.neq(8))
+    .and(scl.neq(9))
+    .and(scl.neq(10))
+    .and(scl.neq(11));
+
+  return image
+    .updateMask(mask)
+    .copyProperties(image, ['system:time_start']);
+}
+
+var s2Masked = s2.map(maskClouds);
+
+print('云掩膜处理后的影像集合：', s2Masked);
+
+
+// ==========================================================
+// 5. 计算单景影像NDVI
+// ==========================================================
+
+function calculateNDVI(image) {
+
+  var ndvi = image.normalizedDifference(
+    ['B8', 'B4']
+  ).rename('NDVI');
+
+  return ndvi.copyProperties(
+    image,
+    ['system:time_start']
+  );
+}
+
+var ndviCollection = s2Masked.map(calculateNDVI);
+
+print('NDVI影像集合：', ndviCollection);
+
+
+// ==========================================================
+// 6. 多时相中位数合成
+// ==========================================================
+
+var ndviMedian = ndviCollection
+  .median()
+  .rename('NDVI')
+  .clipToCollection(roi);
+
+print('最终NDVI合成影像：', ndviMedian);
+
+
+// ==========================================================
+// 7. NDVI可视化
+// ==========================================================
+
+var ndviVis = {
+  min: 0,
+  max: 0.8,
+  palette: [
+    '8c2d04',
+    'd94801',
+    'fdae61',
+    'ffffbf',
+    'a6d96a',
+    '1a9850'
+  ]
+};
+
+Map.addLayer(
+  ndviMedian,
+  ndviVis,
+  '2024 Pu-er NDVI'
+);
+
+
+// ==========================================================
+// 8. NDVI分级
+// ==========================================================
+
+// 分为5个等级：
+// 1：NDVI < 0.2
+// 2：0.2 ≤ NDVI < 0.4
+// 3：0.4 ≤ NDVI < 0.6
+// 4：0.6 ≤ NDVI < 0.8
+// 5：NDVI ≥ 0.8
+
+var ndviClass = ee.Image(1)
+  .where(ndviMedian.gte(0.2), 2)
+  .where(ndviMedian.gte(0.4), 3)
+  .where(ndviMedian.gte(0.6), 4)
+  .where(ndviMedian.gte(0.8), 5)
+  .updateMask(ndviMedian.mask())
+  .rename('NDVI_Class')
+  .clipToCollection(roi);
+
+var classVis = {
+  min: 1,
+  max: 5,
+  palette: [
+    'a50026',
+    'fdae61',
+    'ffffbf',
+    'a6d96a',
+    '006837'
+  ]
+};
+
+Map.addLayer(
+  ndviClass,
+  classVis,
+  'NDVI Classification'
+);
+
+
+// ==========================================================
+// 9. NDVI统计分析
+// ==========================================================
+
+var stats = ndviMedian.reduceRegion({
+  reducer: ee.Reducer.mean()
+    .combine({
+      reducer2: ee.Reducer.stdDev(),
+      sharedInputs: true
+    })
+    .combine({
+      reducer2: ee.Reducer.minMax(),
+      sharedInputs: true
+    }),
+  geometry: region,
+  scale: 10,
+  maxPixels: 1e13,
+  tileScale: 4
+});
+
+print('NDVI统计结果（均值、标准差、最小值、最大值）：',
+      stats);
+
+
+// ==========================================================
+// 10. 有效像元数量统计
+// ==========================================================
+
+var validPixels = ndviMedian.reduceRegion({
+  reducer: ee.Reducer.count(),
+  geometry: region,
+  scale: 10,
+  maxPixels: 1e13,
+  tileScale: 4
+});
+
+print('有效NDVI像元数量：', validPixels);
+
+
+// ==========================================================
+// 11. NDVI分级面积统计
+// ==========================================================
+
+// 计算每个等级的像元面积
+var areaImage = ee.Image.pixelArea()
+  .divide(1e6)
+  .rename('Area')
+  .addBands(ndviClass);
+
+var areaStats = areaImage.reduceRegion({
+  reducer: ee.Reducer.sum().group({
+    groupField: 1,
+    groupName: 'NDVI等级'
+  }),
+  geometry: region,
+  scale: 10,
+  maxPixels: 1e13,
+  tileScale: 4
+});
+
+print('NDVI各等级面积统计（平方公里）：',
+      areaStats);
+
+
+// ==========================================================
+// 12. 导出NDVI连续栅格
+// ==========================================================
+
+Export.image.toDrive({
+  image: ndviMedian,
+  description: 'Puer_NDVI_2024',
+  folder: 'GEE_Experiment',
+  fileNamePrefix: 'Puer_NDVI_2024',
+  region: region,
+  scale: 10,
+  crs: 'EPSG:32647',
+  maxPixels: 1e13,
+  fileFormat: 'GeoTIFF'
+});
+
+
+// ==========================================================
+// 13. 导出NDVI分级栅格
+// ==========================================================
+
+Export.image.toDrive({
+  image: ndviClass,
+  description: 'Puer_NDVI_Class_2024',
+  folder: 'GEE_Experiment',
+  fileNamePrefix: 'Puer_NDVI_Class_2024',
+  region: region,
+  scale: 10,
+  crs: 'EPSG:32647',
+  maxPixels: 1e13,
+  fileFormat: 'GeoTIFF'
+});
+
+
+// ==========================================================
+// 14. 输出完成提示
+// ==========================================================
+
+print('普洱市NDVI实验代码加载完成！');
+print('请检查Console统计结果，并在Tasks中提交两个导出任务。');
