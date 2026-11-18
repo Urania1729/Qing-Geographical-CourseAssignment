@@ -1,0 +1,27 @@
+import csv
+import json
+
+INPUT_CSV = "STDBSCAN_点位标签.csv"
+OUTPUT_JSON = "stdbscan_points.json"
+
+out_rows = []
+with open(INPUT_CSV, "r", encoding="utf-8-sig") as f:
+    reader = csv.DictReader(f)
+    for row in reader:
+        cluster = int(row["cluster"].strip())
+        if cluster <= 0:
+            continue  # 过滤噪声点cluster=0，不参与生成轨迹
+        item = {
+            "cluster": cluster,
+            "date": row["date"].strip(),
+            "decimalLongitude": float(row["decimalLongitude"]),
+            "decimalLatitude": float(row["decimalLatitude"]),
+            "individualCount": float(row["individualCount"])
+        }
+        out_rows.append(item)
+
+with open(OUTPUT_JSON, "w", encoding="utf-8") as fw:
+    json.dump(out_rows, fw, ensure_ascii=False, indent=2)
+
+print(f"转换完成，有效簇记录数量：{len(out_rows)}")
+print(f"输出文件：{OUTPUT_JSON}")
